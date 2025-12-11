@@ -7,7 +7,8 @@ const supabase = createClient(
 
 async function getAIResponse(userMessage) {
   const apiKey = process.env.GROQ_API_KEY;
-  
+  if (!apiKey) return "Error: GROQ_API_KEY is missing in Vercel.";
+
   // Fetch Products
   const { data: products } = await supabase
     .from('products')
@@ -33,6 +34,8 @@ async function getAIResponse(userMessage) {
     });
 
     const data = await response.json();
+    if (data.error) return `Groq Error: ${data.error.message}`;
+    
     const result = JSON.parse(data.choices[0].message.content);
 
     if (result.intent === "finalize_payment") {
@@ -41,35 +44,46 @@ async function getAIResponse(userMessage) {
     }
     return result.reply;
   } catch (e) {
-    return "I'm thinking...";
+    return `Brain Error: ${e.message}`;
   }
 }
 
 export async function POST(req) {
   try {
     const body = await req.json();
+    console.log("📩 INCOMING BODY:", JSON.stringify(body)); // DEBUG LOG 1
+
     if (body.message && body.message.text) {
       const chatId = body.message.chat.id;
       const text = body.message.text;
       
-      // Send "Typing..." status
-      await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendChatAction`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId, action: 'typing' })
-      });
-
+      // 1. Get AI Reply
       const aiReply = await getAIResponse(text);
+      console.log("🤖 AI REPLY:", aiReply); // DEBUG LOG 2
 
-      await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      // 2. Send to Telegram (AND CHECK RESPONSE)
+      const token = process.env.TELEGRAM_BOT_TOKEN;
+      if (!token) console.error("❌ FATAL: TELEGRAM_BOT_TOKEN is missing!");
+
+      const tgRes = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chat_id: chatId, text: aiReply })
       });
-      return Response.json({ status: "success" });
+
+      const tgData = await tgRes.json();
+      console.log("📤 TELEGRAM API RESPONSE:", JSON.stringify(tgData)); // DEBUG LOG 3
+
+      if (!tgData.ok) {
+        console.error("❌ TELEGRAM FAILED:", tgData.description);
+      }
+
+      return Response.json({ status: "success", telegram_response: tgData });
     }
-    return Response.json({ status: "ignored" });
+
+    return Response.json({ status: "ignored", reason: "Not a text message" });
   } catch (error) {
+    console.error("❌ SERVER CRASH:", error);
     return Response.json({ error: error.message }, { status: 500 });
   }
 }
