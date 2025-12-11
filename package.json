@@ -1,0 +1,19 @@
+{
+  "name": "whatsapp-sales-agent",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.87.1",
+    "dotenv": "^17.2.3",
+    "next": "^16.0.8",
+    "react": "^19.2.1",
+    "react-dom": "^19.2.1"
+  }
+}
