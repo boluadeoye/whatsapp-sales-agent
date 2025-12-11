@@ -5,11 +5,21 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-async function getAIResponse(userMessage) {
+async function getAIResponse(chatId, userMessage) {
   const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey) return "Error: GROQ_API_KEY is missing in Vercel.";
+  
+  // 1. Save User Message to DB
+  await supabase.from('messages').insert({ chat_id: chatId.toString(), role: 'user', content: userMessage });
 
-  // Fetch Products
+  // 2. Fetch Last 10 Messages (Memory)
+  const { data: history } = await supabase
+    .from('messages')
+    .select('role, content')
+    .eq('chat_id', chatId.toString())
+    .order('created_at', { ascending: true })
+    .limit(10);
+
+  // 3. Fetch Inventory
   const { data: products } = await supabase
     .from('products')
     .select('id, name, price')
@@ -17,9 +27,20 @@ async function getAIResponse(userMessage) {
 
   const systemPrompt = `
   You are a Sales AI. Inventory: ${JSON.stringify(products)}.
-  Rules: Negotiate politely. If agreed, output intent: finalize_payment.
+  
+  RULES:
+  1. REMEMBER CONTEXT. If user says "Yes", look at previous messages to know what they want.
+  2. Negotiate politely.
+  3. If agreed, output intent: finalize_payment.
+  
   Output JSON: { "intent": "string", "reply": "string" }
   `;
+
+  // Format history for Groq
+  const messagesPayload = [
+    { role: "system", content: systemPrompt },
+    ...history.map(msg => ({ role: msg.role, content: msg.content }))
+  ];
 
   try {
     const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
@@ -27,63 +48,55 @@ async function getAIResponse(userMessage) {
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
       body: JSON.stringify({
         model: "llama-3.3-70b-versatile",
-        messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userMessage }],
+        messages: messagesPayload,
         temperature: 0.1,
         response_format: { type: "json_object" }
       })
     });
 
     const data = await response.json();
-    if (data.error) return `Groq Error: ${data.error.message}`;
-    
     const result = JSON.parse(data.choices[0].message.content);
 
     if (result.intent === "finalize_payment") {
       const ref = Math.floor(Math.random() * 1000000);
       result.reply += `\n\n💳 Pay here: https://paystack.com/pay/${ref}`;
     }
+
+    // 4. Save AI Reply to DB
+    await supabase.from('messages').insert({ chat_id: chatId.toString(), role: 'assistant', content: result.reply });
+
     return result.reply;
   } catch (e) {
-    return `Brain Error: ${e.message}`;
+    console.error(e);
+    return "I'm thinking...";
   }
 }
 
 export async function POST(req) {
   try {
     const body = await req.json();
-    console.log("📩 INCOMING BODY:", JSON.stringify(body)); // DEBUG LOG 1
-
     if (body.message && body.message.text) {
       const chatId = body.message.chat.id;
       const text = body.message.text;
-      
-      // 1. Get AI Reply
-      const aiReply = await getAIResponse(text);
-      console.log("🤖 AI REPLY:", aiReply); // DEBUG LOG 2
 
-      // 2. Send to Telegram (AND CHECK RESPONSE)
-      const token = process.env.TELEGRAM_BOT_TOKEN;
-      if (!token) console.error("❌ FATAL: TELEGRAM_BOT_TOKEN is missing!");
+      // Send "Typing..."
+      await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendChatAction`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, action: 'typing' })
+      });
 
-      const tgRes = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      const aiReply = await getAIResponse(chatId, text);
+
+      await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chat_id: chatId, text: aiReply })
       });
-
-      const tgData = await tgRes.json();
-      console.log("📤 TELEGRAM API RESPONSE:", JSON.stringify(tgData)); // DEBUG LOG 3
-
-      if (!tgData.ok) {
-        console.error("❌ TELEGRAM FAILED:", tgData.description);
-      }
-
-      return Response.json({ status: "success", telegram_response: tgData });
+      return Response.json({ status: "success" });
     }
-
-    return Response.json({ status: "ignored", reason: "Not a text message" });
+    return Response.json({ status: "ignored" });
   } catch (error) {
-    console.error("❌ SERVER CRASH:", error);
     return Response.json({ error: error.message }, { status: 500 });
   }
 }
